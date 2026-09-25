@@ -219,6 +219,31 @@ def test_slurm_unreachable_without_mock_raises_error(monkeypatch):
         runtime.tick(5.0)
 
 
+@pytest.mark.parametrize(
+    "script, expected",
+    [
+        # What the dashboard sends: one command, no interpreter line.
+        ("sleep 30", "#!/bin/bash\nsleep 30\n"),
+        # A real script is sent as written.
+        ("#!/bin/sh\necho hi\n", "#!/bin/sh\necho hi\n"),
+    ],
+)
+def test_slurm_submit_gives_a_bare_command_an_interpreter_line(monkeypatch, script, expected):
+    """slurmstepd exec()s the batch script: without "#!" the job fails on the node."""
+    captured_payloads = []
+
+    def mock_post(url, *args, **kwargs):
+        captured_payloads.append(kwargs.get("json", {}))
+        return type("MockResponse", (), {"status_code": 200, "text": "ok", "json": lambda self: {"job_id": "901"}})()
+
+    monkeypatch.delenv("MOCK_SLURM", raising=False)
+    monkeypatch.setattr("requests.post", mock_post)
+    runtime = SlurmRuntime()
+    runtime.submit_job(name="page-run", cpu=2, partition="debug", script=script)
+
+    assert captured_payloads[0]["job"]["script"] == expected
+
+
 def test_slurm_apply_payload_includes_machine_type_and_provisioning_mix(monkeypatch):
     captured_payloads = []
 

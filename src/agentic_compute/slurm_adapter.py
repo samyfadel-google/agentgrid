@@ -437,6 +437,13 @@ class SlurmRuntime(RuntimeAdapter):
         part_mtype = SUPPORTED_SLURM_PARTITIONS.get(target_partition, {}).get("machine_type") if target_partition else None
         comment_str = f"machine_type={req_mtype or part_mtype or 'unknown'};provisioning_model={req_pmix}"
 
+        # slurmstepd exec()s the batch script, so it needs an interpreter line.
+        # Callers such as the dashboard send one command ("sleep 30"), not a
+        # script, and without "#!" the job fails on the node with "Exec format
+        # error" (sbatch refuses such a script up front; slurmrestd does not).
+        if script and not script.lstrip().startswith("#!"):
+            script = f"#!/bin/bash\n{script.strip()}\n"
+
         payload_job: dict[str, Any] = {
             "name": name,
             "tasks": 1,
@@ -892,6 +899,10 @@ class SlurmRuntime(RuntimeAdapter):
                 verification_status=self.verification_status,
                 verification_detail=self.verification_detail,
                 cost_basis=self.cost_basis,
+                # Found on the controller, or submitted by this process
+                # (mock submissions carry a "mock-" id). Otherwise the record
+                # is the placeholder set by reset(), not a job.
+                job_found=self.is_real_slurm_job or str(self.active_job_id).startswith("mock-"),
             ),
             objective=Objective(
                 deadline_at_minutes=self.deadline_minutes,

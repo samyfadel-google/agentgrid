@@ -903,6 +903,82 @@ def test_the_cluster_warning_stays_hidden_when_runs_reach_the_runtime_shown(monk
     assert "Runs from this page do not reach" not in outcome["text"]
 
 
+def test_the_runtime_card_names_the_cluster_the_page_is_not_connected_to(monkeypatch):
+    """"no cluster involved" sat next to the live figures of a real cluster.
+
+    The operator read "Runs go to: Simulator, no cluster involved" as "you have
+    no cluster", on a page showing his Slurm cluster's nodes. The card must say
+    that this page is not connected to that cluster.
+    """
+    import render_check
+
+    snapshot = _proxied_slurm_snapshot(monkeypatch)
+    source = extract_babel_blocks(DEFAULT_TARGET.read_text(encoding="utf-8"))[0]
+    seeded = render_check.seed_state(source, {"snapshotPayload": snapshot})
+    outcome = render_check.render_tab(seeded, "cluster")
+
+    assert not outcome["errors"], outcome["errors"]
+    assert "no cluster involved" not in outcome["text"]
+    assert "not your Slurm cluster" in outcome["text"]
+
+
+def _slurm_connected_snapshot_without_a_job(monkeypatch) -> dict:
+    """What a Slurm-connected agent service serves before anything was submitted."""
+    import requests
+    from fastapi.testclient import TestClient
+
+    import agentic_compute.mcp_server as mcp_server
+    from agentic_compute.slurm_adapter import SlurmRuntime
+    from compute_agent.app import app
+
+    class _Resp:
+        def __init__(self, status_code, payload):
+            self.status_code, self._payload, self.text = status_code, payload, ""
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, *args, **kwargs):
+        if url.endswith("/nodes"):
+            return _Resp(200, {"nodes": [{"name": "debug-0", "cpus": 2, "idle_cpus": 2}]})
+        if url.endswith("/ping"):
+            return _Resp(200, {})
+        return _Resp(500, {"jobs": [], "errors": [{"description": "Invalid job id specified"}]})
+
+    monkeypatch.delenv("MOCK_SLURM", raising=False)
+    monkeypatch.setenv("COMPUTE_RUNTIME", "slurm")
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(mcp_server, "_runtime", SlurmRuntime(base_url="http://slurm.test/slurm/v0.0.41"))
+
+    payload = TestClient(app).get("/api/snapshot").json()
+    assert payload["snapshot_source"] == "local_runtime", payload
+    assert payload["snapshot"]["workload"]["job_found"] is False, payload
+    return payload
+
+
+def test_a_placeholder_workload_is_neither_shown_nor_diagnosed_as_a_job(monkeypatch):
+    """The Slurm adapter's placeholder (job "1", PENDING) is not a job waiting on the cluster.
+
+    Production showed "Current job: 1 · pending · unverified" and a "Why is my
+    job waiting?" diagnosis on a cluster with no job at all.
+    """
+    import render_check
+
+    snapshot = _slurm_connected_snapshot_without_a_job(monkeypatch)
+    source = extract_babel_blocks(DEFAULT_TARGET.read_text(encoding="utf-8"))[0]
+    seeded = render_check.seed_state(source, {"snapshotPayload": snapshot})
+    outcome = render_check.render_tab(seeded, "cluster")
+
+    assert not outcome["errors"], outcome["errors"]
+    text = outcome["text"]
+    assert "your cluster" in text
+    assert "No job on the runtime yet." in text
+    assert "pending · unverified" not in text
+    # The re-diagnose button only exists for a job that waits or failed.
+    assert "Check again" not in text
+    assert "Runs from this page do not reach" not in text
+
+
 def test_a_queued_run_is_never_shown_as_a_measured_zero():
     """A run that has only been submitted has no measured cost yet.
 

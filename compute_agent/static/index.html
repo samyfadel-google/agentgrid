@@ -819,7 +819,10 @@
       const onSlurm = execRuntime === "slurm";
       const runtimeMismatch = !!(snapshotPayload && snapshotPayload.runtime_mismatch);
       const snap = (snapshotPayload && snapshotPayload.snapshot) || null;
-      const liveWl = (snap && snap.workload) || null;
+      // The Slurm adapter reports a placeholder (job "1", PENDING) until it
+      // submits or finds a job. It is not a job: never show or diagnose it.
+      const reportedWl = (snap && snap.workload) || null;
+      const liveWl = reportedWl && reportedWl.job_found !== false ? reportedWl : null;
       // Only a job the runtime reports as waiting or failed has something to
       // diagnose; a running or finished one is not held back by anything.
       const liveState = liveWl ? String(liveWl.status || "").toUpperCase() : "";
@@ -1331,7 +1334,9 @@
         ? { tone: "", label: "Connecting…", title: "Waiting for the first runtime snapshot" }
         : onSlurm
         ? { tone: "ok", label: "Slurm", title: "Plans are submitted to the Slurm cluster and checked against what it reports." }
-        : { tone: "warn", label: "Simulator", title: "Plans run in an in-process simulator: nothing reaches a cluster." };
+        : runtimeMismatch && snapshotPayload.runtime === "slurm"
+        ? { tone: "warn", label: "Simulator", title: "Runs from this page go to the simulator: this page isn't connected to your Slurm cluster." }
+        : { tone: "warn", label: "Simulator", title: "Runs from this page go to the simulator: this page isn't connected to a cluster." };
 
       const approveStep =
         mode === "advisory"
@@ -2359,7 +2364,15 @@
                     <Metric
                       label="Runs go to"
                       value={execRuntime === null ? "—" : onSlurm ? "Slurm" : "Simulator"}
-                      note={onSlurm ? "real cluster" : execRuntime === null ? "" : "no cluster involved"}
+                      note={
+                        execRuntime === null
+                          ? ""
+                          : onSlurm
+                            ? "your cluster"
+                            : runtimeMismatch && snapshotPayload.runtime === "slurm"
+                              ? "not your Slurm cluster: this page isn't connected to it"
+                              : "this page isn't connected to a cluster"
+                      }
                       tone={onSlurm ? "ok" : ""}
                     />
                     <Metric
@@ -2582,7 +2595,15 @@
                     <div className="rows">
                       <div>
                         <span>Runs on</span>
-                        <span>{onSlurm ? "Slurm cluster" : execRuntime === null ? "unknown runtime" : "in-process simulator (no cluster)"}</span>
+                        <span>
+                          {onSlurm
+                            ? "your Slurm cluster"
+                            : execRuntime === null
+                              ? "unknown runtime"
+                              : runtimeMismatch && snapshotPayload.runtime === "slurm"
+                                ? "the simulator, not your Slurm cluster"
+                                : "the simulator (this page isn't connected to a cluster)"}
+                        </span>
                       </div>
                       <div>
                         <span>Region</span>

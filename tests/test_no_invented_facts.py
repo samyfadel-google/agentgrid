@@ -144,3 +144,77 @@ def test_each_capacity_row_names_the_quota_it_was_checked_against(live_quotas, m
     assert spot and rows, rows
     assert {r["quota_metric"] for r in rows} == {"CPUS"}, rows
     assert {r["quota_status"] for r in spot} == {"QUOTA_AVAILABLE"}, spot
+
+
+# ---------------------------------------------------------------------------
+# Runtime snapshot: a placeholder is not a job
+# ---------------------------------------------------------------------------
+
+
+class _SlurmResp:
+    def __init__(self, status_code=200, payload=None):
+        self.status_code = status_code
+        self._payload = payload if payload is not None else {}
+        self.text = ""
+
+    def json(self):
+        return self._payload
+
+
+def _slurm_controller(monkeypatch, known_jobs):
+    """Stub slurmrestd: /ping and /nodes answer, /job/<id> knows ``known_jobs``."""
+    import requests
+
+    def fake_get(url, *args, **kwargs):
+        if url.endswith("/ping"):
+            return _SlurmResp(200, {"pings": [{"pinged": "UP"}]})
+        if url.endswith("/nodes"):
+            return _SlurmResp(200, {"nodes": [{"name": "debug-0", "cpus": 2, "idle_cpus": 2}]})
+        job_id = url.rsplit("/job/", 1)[-1]
+        if job_id in known_jobs:
+            return _SlurmResp(200, {"jobs": [known_jobs[job_id]]})
+        # What slurmrestd answers about a job it does not know.
+        return _SlurmResp(500, {"jobs": [], "errors": [{"description": "Invalid job id specified"}]})
+
+    monkeypatch.delenv("MOCK_SLURM", raising=False)
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _SlurmResp(200, {"job_id": 4242}))
+
+
+def test_the_slurm_placeholder_is_not_reported_as_a_job(monkeypatch):
+    """Before any submission the adapter tracks job "1", PENDING, which does not exist.
+
+    Production showed "Current job: 1 · pending" and offered to diagnose why it
+    was waiting, on a cluster that had no job at all.
+    """
+    from agentic_compute.slurm_adapter import SlurmRuntime
+
+    _slurm_controller(monkeypatch, known_jobs={})
+    workload = SlurmRuntime(base_url="http://slurm.test/slurm/v0.0.41").snapshot().workload
+
+    assert workload.job_found is False, workload
+
+
+def test_a_job_the_controller_reports_is_a_job(monkeypatch):
+    from agentic_compute.slurm_adapter import SlurmRuntime
+
+    _slurm_controller(
+        monkeypatch,
+        known_jobs={"77": {"job_id": 77, "job_state": ["RUNNING"], "partition": "debug"}},
+    )
+    workload = SlurmRuntime(base_url="http://slurm.test/slurm/v0.0.41", job_id="77").snapshot().workload
+
+    assert workload.job_found is True, workload
+    assert workload.id == "77"
+
+
+def test_a_job_submitted_here_is_a_job_before_the_controller_lists_it(monkeypatch):
+    from agentic_compute.slurm_adapter import SlurmRuntime
+
+    _slurm_controller(monkeypatch, known_jobs={})
+    runtime = SlurmRuntime(base_url="http://slurm.test/slurm/v0.0.41")
+    runtime.submit_job(name="probe", cpu=2, partition="debug", script="#!/bin/bash\nsleep 30\n")
+    workload = runtime.snapshot().workload
+
+    assert workload.job_found is True, workload
+    assert workload.id == "4242"

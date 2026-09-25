@@ -55,12 +55,38 @@ if [ "${REQUIRE_IAM_AUTH:-false}" = "true" ] || [ "${ALLOW_UNAUTHENTICATED:-true
   AGENT_AUTH_FLAG="--no-allow-unauthenticated"
 fi
 
-AGENT_SECRET_FLAG=""
-if [ -n "${AGENTGRID_API_KEY_SECRET:-}" ] && [ "$AGENTGRID_API_KEY_SECRET" != "none" ]; then
-  AGENT_SECRET_FLAG="--set-secrets=AGENTGRID_API_KEY=${AGENTGRID_API_KEY_SECRET}:latest"
+AGENT_ENV_VARS="MCP_SERVER_URL=${MCP_URL},GOOGLE_GENAI_USE_VERTEXAI=TRUE,AGENTIC_COMPUTE_MODEL=${MODEL},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION}"
+AGENT_SECRETS=""
+AGENT_VPC_FLAGS=""
+
+# The dashboard's "Run" submits through the agent service's own runtime
+# (compute_agent/app.py), never through the MCP server. Without the Slurm
+# settings the agent falls back to its in-process simulator while its
+# /api/snapshot shows the MCP server's real cluster, so runs never reached the
+# cluster on screen. Set AGENT_COMPUTE_RUNTIME=simulator to keep a demo agent.
+AGENT_COMPUTE_RUNTIME="${AGENT_COMPUTE_RUNTIME:-slurm}"
+if [ "$AGENT_COMPUTE_RUNTIME" = "slurm" ]; then
+  echo "Connecting $AGENT_SERVICE_NAME to Slurm at $SLURM_REST_URL"
+  AGENT_ENV_VARS="${AGENT_ENV_VARS},COMPUTE_RUNTIME=slurm,SLURM_REST_URL=${SLURM_REST_URL}"
+  AGENT_VPC_FLAGS="$VPC_FLAGS"
+  if [ -n "$SECRET_FLAG" ]; then
+    AGENT_SECRETS="SLURM_JWT_TOKEN=${SLURM_SECRET_NAME}:latest"
+  fi
+else
+  echo "Notice: $AGENT_SERVICE_NAME runs the simulator (AGENT_COMPUTE_RUNTIME=$AGENT_COMPUTE_RUNTIME); dashboard runs will not reach Slurm."
 fi
 
-echo "==> Deploying $AGENT_SERVICE_NAME (Auth: $AGENT_AUTH_FLAG)..."
+if [ -n "${AGENTGRID_API_KEY_SECRET:-}" ] && [ "$AGENTGRID_API_KEY_SECRET" != "none" ]; then
+  AGENT_SECRETS="${AGENT_SECRETS:+${AGENT_SECRETS},}AGENTGRID_API_KEY=${AGENTGRID_API_KEY_SECRET}:latest"
+fi
+
+# One --set-secrets flag: a second one would replace the first.
+AGENT_SECRET_FLAG=""
+if [ -n "$AGENT_SECRETS" ]; then
+  AGENT_SECRET_FLAG="--set-secrets=${AGENT_SECRETS}"
+fi
+
+echo "==> Deploying $AGENT_SERVICE_NAME (Auth: $AGENT_AUTH_FLAG, runtime: $AGENT_COMPUTE_RUNTIME)..."
 gcloud run deploy "$AGENT_SERVICE_NAME" \
   --project="$PROJECT_ID" \
   --image="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPO}/agent-service:${COMMIT_SHA}" \
@@ -70,7 +96,8 @@ gcloud run deploy "$AGENT_SERVICE_NAME" \
   --no-cpu-throttling \
   --timeout=1800 \
   --session-affinity \
-  --set-env-vars="MCP_SERVER_URL=${MCP_URL},GOOGLE_GENAI_USE_VERTEXAI=TRUE,AGENTIC_COMPUTE_MODEL=${MODEL},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION}" \
+  --set-env-vars="$AGENT_ENV_VARS" \
+  $AGENT_VPC_FLAGS \
   $AGENT_SECRET_FLAG
 
 # 6. Authorize Agent Service to invoke private MCP Server via IAM OIDC

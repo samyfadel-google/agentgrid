@@ -40,6 +40,11 @@ class WorkloadState(BaseModel):
     ] = "unverified"
     verification_detail: str | None = None
     cost_basis: str = "unverified"
+    #: False when no actual job stands behind this record. The Slurm adapter
+    #: keeps a placeholder (job "1", PENDING) until it submits a job or finds
+    #: the one it was told to track, and that placeholder used to be shown,
+    #: and diagnosed, as a real job waiting on the cluster.
+    job_found: bool = True
 
     @model_validator(mode="after")
     def sync_observed(self) -> "WorkloadState":
