@@ -1,623 +1,276 @@
+<div align="center">
+
 # AgentGrid
+
+**Run batch jobs for less, without missing deadlines.**
+
+AgentGrid prices every way to run a batch job, recommends the cheapest plan that still meets your deadline,
+submits it to Slurm only with your approval, then checks on the controller what actually ran.
 
 [![Powered by Google Antigravity](https://img.shields.io/badge/Powered%20by-Google%20Antigravity-4285F4.svg?logo=google&logoColor=white)](https://antigravity.google)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Google Cloud](https://img.shields.io/badge/Google%20Cloud-Cloud%20Run%20%7C%20Vertex%20AI%20%7C%20Slurm-4285F4.svg)](https://cloud.google.com/)
 
-> 🚀 **Built and powered with Google Antigravity** — the next-generation agentic AI platform empowering engineers to design, build, and deploy intelligent cloud infrastructure, policy-governed agentic systems, and adaptive compute optimization at scale.
+<br>
 
-**An open-source, objective-driven control plane for heterogeneous HPC and AI compute infrastructure.**
+<img src="docs/images/agentgrid-dashboard.png" alt="The AgentGrid Run tab after a run: the recommended plan costs 72% less than the fastest plan for the same deadline, and job 1001 is completed and verified on Slurm" width="100%">
 
-> **"Give the system a business objective, not a static resource guess."**
+<sub>The Run tab after a run: three plans compared, the cheapest one that meets the deadline approved, then submitted and verified on Slurm.<br>
+Captured locally against a mock <code>slurmrestd</code>. Costs and times are modelled, as the page says.</sub>
 
-AgentGrid bridges business SLAs and infrastructure scheduling. By combining **deterministic forecasting software** with **policy-governed Gemini reasoning**, AgentGrid dynamically monitors, resizes, and verifies compute workloads across Slurm clusters and Cloud environments to meet execution deadlines at minimal cost.
-
----
-
-## The Problem: The High Cost of Guessing Compute
-
-In modern AI training, Monte Carlo simulations, and HPC research, resource allocation is fundamentally broken:
-
-* **The Overprovisioning Tax**: Engineers routinely overestimate CPU, GPU, and memory requests (`--cpus-per-task`, `--mem`) to prevent job failures, wasting up to 40% of cloud budgets.
-* **Deadlines vs. Costs**: Workloads have strict deadlines and financial constraints. Traditional schedulers (Slurm, Kubernetes) only manage static priority queues—they cannot reason dynamically about trade-offs between completion deadlines and budget limits.
-* **Rigid Autoscaling**: Conventional reactive scalers trigger on raw infrastructure metrics (e.g., `CPU > 80%`). They cannot predict workload convergence, evaluate cost curves, assess Spot preemption risks, or verify post-actuation cluster telemetry.
+</div>
 
 ---
 
-## The AgentGrid Solution: Objective-Driven, Guardrailed Optimization
+## Why AgentGrid
 
-Instead of manual cluster babysitting, operators declare high-level **business intent**:
+Batch jobs are usually sized by habit ("60 cores, to be safe"). The constraints that matter, a deadline and a
+budget, are not something Slurm or the cloud console reasons about. AgentGrid does the arithmetic before the run
+and checks the facts after it.
 
-```json
-{
-  "objective": "Run the genomic sequence analysis. Complete before 08:00 AM under $250, minimizing overall cost."
-}
-```
+- **Cheaper, by construction.** Every executable machine shape is priced against your deadline. The
+  recommendation is the cheapest plan that still meets it, and the page says how much less it costs than the
+  fastest plan for the same deadline.
+- **Nothing runs without you.** Plans are proposals. In the default mode a job is submitted only after you
+  approve that exact plan, and a double click or a retried request never starts a second job.
+- **Checked, not assumed.** A job counts as running only when the Slurm controller reports an allocation for
+  it. Modelled numbers are labelled as modelled and never shown as measured.
 
-AgentGrid continuously executes a **closed-loop control and verification cycle**, adapting workload resources within operator-defined boundaries while independently verifying cluster state.
+## How it works
 
-### The Guardrailed Closed-Loop Control Cycle
+The dashboard follows the four steps of a run.
+
+| Step | What AgentGrid does |
+| :--- | :--- |
+| **1. Describe** | You give the command, the vCPU and memory, how long the work takes on one vCPU, the deadline, the budget, and whether the job can be interrupted. |
+| **2. Compare** | A deterministic engine scales the work to each machine shape (Amdahl's law, 97% parallel for a parallel job), prices it, drops the shapes that miss the deadline or the budget, and checks the rest against your Compute Engine quota. You get up to three plans: *Lowest cost*, *Fastest* and *Balanced*. When nothing fits, you get what blocks and what to relax, never an invented winner. |
+| **3. Approve** | You approve one plan. The approval is bound to the plan's content: change the plan and the approval no longer applies. |
+| **4. Verify** | AgentGrid submits the job through `slurmrestd` and follows it on the controller: pending, running on the allocated CPUs, completed. The **Cluster** tab shows the live controller state, the capacity that could take the next job, and why a job may be waiting. |
+
+On Slurm, the machine shapes are your partitions (see [Connect your Slurm cluster](#connect-your-slurm-cluster)).
 
 ```mermaid
-flowchart TD
-    subgraph Loop ["Policy-Governed Closed-Loop Optimization"]
-        A["1. Observe Telemetry<br/>(Cluster capacity, real Slurm allocation, elapsed time)"] --> B["2. Deterministic Forecast<br/>(Exact mathematical ETAs & cost curves for candidates)"]
-        B --> C["3. Agentic Reasoning (Gemini)<br/>(Evaluate deadline vs. cost vs. Spot preemption risk)"]
-        C --> D["4. Standardized Actuation (MCP)<br/>(Submit jobs, resize resources, advance timeline)"]
-        D --> E["5. Independent Verification<br/>(Authoritative Slurm confirmation, timeout deadlines, mismatch detection)"]
-        E --> A
-    end
+flowchart LR
+    Op(["Operator"]) --> UI["Dashboard<br/>Run · Ledger · Cluster"]
+    UI --> API["Control plane<br/>FastAPI"]
+    API --> Plans["Plan engine<br/>deterministic"]
+    API --> Gov["Governance and ledger<br/>SQLite"]
+    API --> RT["Runtime adapter"]
+    API --> GCP["Compute Engine quota<br/>and Capacity Advisor"]
+    API -- "/optimize" --> Agent["Gemini agent<br/>Google ADK"]
+    Agent -- "MCP tools" --> MCP["MCP server"]
+    MCP --> RT
+    RT --> Slurm[("Slurm<br/>slurmrestd")]
+    RT --> Sim[("Built-in simulator")]
 ```
 
----
+## What makes it trustworthy
 
-## Flexible Operator Control: Built for Enterprise Trust
+- **Arithmetic is code.** Plans, quota checks, ceilings and verification are deterministic Python. The Gemini
+  agent is optional (`/optimize`) and acts only through typed MCP tools that enforce the same rules.
+- **Three kinds of numbers, never mixed.** *Measured* (read from the runtime), *modelled* (the plan engine:
+  0.050 EUR per vCPU-hour by default, not a cloud price) and *declared* (a figure someone typed). The dashboard
+  and the API label each one.
+- **Governance held by the server.** *Advisory* never changes anything, *Validation* (the default) needs your
+  approval for each plan, *Delegation* runs within a budget, machine types, regions and a retry count. A caller
+  can tighten the mode, never loosen it.
+- **Exactly-once submission.** A submission is claimed in SQLite, keyed by workload and plan fingerprint,
+  before the runtime is touched. A double click, a replayed request or a restart resolve to the same job.
+- **Ceilings that add up.** The delegated budget and the retry count are rebuilt from the submission ledger
+  inside the same transaction as the claim, so concurrent requests cannot slip past them.
+- **Constraints bind execution.** Regions, zones, Spot and fallback rules declared on the workload are checked
+  at submission and on every fallback rung, not only when planning.
 
-To avoid unconstrained autopilot risks, AgentGrid is designed around progressive, human-in-the-loop governance with three distinct operating modes:
+How each guarantee is enforced, and the test that pins it: [docs/guarantees.md](docs/guarantees.md).
 
-1. **Advisory / Recommender Mode (Zero-Risk Observability)**:
-   AgentGrid continuously evaluates cluster metrics, Amdahl speedup projections, Capacity Advisor Spot obtainability, and Slack Ratios ($S$). It generates real-time recommendations, cost deltas, and optimal configurations on the dashboard **without actuating any changes** on the underlying cluster. Operators can review and apply recommendations manually.
-2. **Guardrailed Policy Mode (Bounded Autonomy)**:
-   The agent is authorized to actuate resource adjustments **only within strict operator-defined guardrails** (e.g., hard vCPU caps, allowed machine types, budget ceilings, and pre-approved cluster partitions). Any candidate exceeding limits is rejected before reaching the cluster controller.
-3. **Closed-Loop Verified Optimization (Continuous Adaptation)**:
-   The agent actively adapts workload sizing to meet dynamic deadlines. Every actuation is subject to independent, authoritative ground-truth verification from the cluster controller before being confirmed.
+## Status
 
----
+| Area | Status |
+| :--- | :--- |
+| Plans, governance, exactly-once submission, ceilings, constraints | Covered by the test suite (379 tests) |
+| Compute Engine quota read | Exercised against the live API |
+| Slurm adapter | Tested against a mock `slurmrestd`, in unit tests and in a real browser. Live re-run on the reference cluster: pending |
+| Dashboard | Compiled and rendered offline by the test suite, driven in headless Chrome during development |
+| Measured cost and duration in the Ledger | Not written back yet: after a verified run, the Ledger still says "none measured yet" |
+| History on Cloud Run | SQLite inside the container, lost when the instance is replaced |
+| Multi-tenant authentication | Out of scope. An optional shared API key protects the API |
 
-## System Architecture
+## Quick start
 
-AgentGrid enforces strict boundaries between **reasoning (AI)**, **tool protocol (FastMCP)**, and **infrastructure actuation & verification (Runtimes)**. The LLM never runs raw shell commands or unrestricted cluster scripts; it operates exclusively through typed, validated compute abstractions.
-
-```mermaid
-flowchart TB
-    subgraph Clients ["Interfaces & Entrypoints"]
-        Dashboard["AgentGrid Web UI Dashboard<br/>(/ or /ui)"]
-        UI["Swagger API UI<br/>(/docs)"]
-        CLI["ADK CLI / Web<br/>(adk web .)"]
-        API["FastAPI Control Plane<br/>(POST /optimize, /optimize/stream)"]
-    end
-
-    subgraph AgentPlane ["Agentic Intelligence (Cloud Run)"]
-        Agent["Google ADK Agent<br/>(Gemini 2.5 Flash via Vertex AI)"]
-        Prompt["Strategy Engine<br/>• Budget & Deadline trade-offs<br/>• Slack Ratio calculation (S)<br/>• Hedged Spot/Standard policies"]
-        Agent --- Prompt
-    end
-
-    subgraph Protocol ["Universal Tool Boundary (FastMCP)"]
-        MCP["Model Context Protocol<br/>• get_runtime_snapshot()<br/>• get_capacity_advice()<br/>• submit_job(...)<br/>• resize_workload(...)<br/>• advance_time(minutes)<br/>• reset_runtime()"]
-    end
-
-    subgraph Infrastructure ["Heterogeneous Compute Backends"]
-        Sim["Simulated Engine<br/>(Deterministic discrete-event simulator)"]
-        Slurm["GCP Slurm HPC Cluster<br/>(Private VPC via Direct VPC Egress + slurmrestd)"]
-        Advisor["GCP Capacity Advisor<br/>(advice.capacity & advice.capacityHistory REST APIs)"]
-    end
-
-    Clients --> API
-    API --> Agent
-    Agent -->|McpToolset over SSE or stdio| MCP
-    MCP --> Sim
-    MCP --> Slurm
-    MCP --> Advisor
-```
-
----
-
-## Deterministic vs. Agentic Responsibilities
-
-AgentGrid operates on a fundamental principle of reliability: **never ask an LLM to perform arithmetic or validation that deterministic software executes with 100% precision.**
-
-| Responsibility | Deterministic Backend (MCP / Runtime / Validator) | Agentic Brain (Gemini via ADK) |
-| :--- | :---: | :---: |
-| **Cluster Metrics** | Measures live CPU/GPU allocations & queue depth | Interprets workload health and bottlenecks |
-| **Candidate Projections** | Calculates exact Amdahl speedup ETAs and cost curves | Assesses trade-offs against business targets |
-| **Safety & Quota Validation** | Rejects unsupported machine types and invalid provisioning | Adheres to strict operator constraints |
-| **Infrastructure Actuation** | Executes atomic REST calls to `slurmrestd` or simulator | Decides *when* and *which* candidate to scale |
-| **Ground-Truth Verification** | Confirms real allocations on nodes & enforces timeouts | Explains strategy rationale to human operators |
-
----
-
-## Authoritative Slurm Telemetry & Verification Engine
-
-To prevent hallucinated states or out-of-sync cluster metadata, the Slurm adapter implements **independent ground-truth verification**:
-
-1. **Independent State Observation**: Observed machine types (`n2-standard-2`, `c2-standard-60`, `h3-standard-88`) and provisioning modes are derived strictly from controller telemetry (e.g. partition assignment), never echoed from request parameters.
-2. **Genuinely Allocated Resources**: Pending jobs with unfulfilled resource requests remain in `pending_verification` until the Slurm controller assigns active node resources (`allocated_cpus > 0`).
-3. **Separation of Command Outcome & Telemetry**: Commands rejected by Slurm (HTTP 500/400) permanently remain `failed`. Ambient cluster telemetry cannot turn a rejected command into `applied`.
-4. **Verification Deadlines**: An explicit verification deadline (`SLURM_VERIFICATION_TIMEOUT_SECS`) prevents stale requests from lingering in pending states.
-5. **Cost Grounded in Reality**: Cost accrual is strictly calculated from verified, elapsed controller telemetry.
-
----
-
-## Enterprise Spot Optimization & Hedged Provisioning
-
-AgentGrid integrates directly with **Google Cloud Compute Engine Capacity Advisor** (`advice.capacity` & `advice.capacityHistory` REST APIs) to resolve the core dilemma in cloud HPC: **Spot VM cost reduction vs. preemption risk and SLA adherence**.
-
-### 1. Real-Time Spot Obtainability & Preemption Intelligence
-Before scaling, the system inspects:
-- **Obtainability Score** (0.0 to 1.0): Likelihood of acquiring requested Spot VM pools in the target region.
-- **Recommended Zone**: Automatically routes allocations to the zone with highest availability (e.g., `us-central1-f`).
-- **7-Day Historical Preemption Rate**: Trailing probability of interruption to quantify SLA exposure.
-
-### 2. Multi-Machine Family Ranking (Flex Strategy)
-Workloads declare prioritized machine families with automatic fallback:
-1. **Rank 1 (Modern Performance)**: `c2-standard-60` / `h3-standard-88` (Optimal compute density).
-2. **Rank 2 (Broad Availability)**: `n2-standard-32` (Dependable regional capacity).
-3. **Rank 3 (Granular Fallback)**: `n2-standard-16` (Smaller shape to bypass large vCPU allocation bottlenecks).
-
-### 3. Dynamic Hedged Provisioning Policy
-The optimization policy calculates the **Deadline Slack Ratio** $S$:
-
-$$S = \frac{\text{Deadline} - \text{Elapsed Time}}{\text{Estimated Remaining Time (ETA)}}$$
-
-* **High Slack ($S > 1.5$)**: 100% Spot VM allocation to maximize financial savings.
-* **Moderate Slack ($1.1 < S \le 1.5$)**: Hedged allocation (e.g., 80% Spot / 20% Standard baseline) to buffer against preemption events.
-* **Critical Slack ($S \le 1.1$) or Preemption Surge**: Immediate fallback to 100% Standard On-Demand capacity to guarantee deadline compliance.
-
----
-
-
----
-
-## Six Core Product Capabilities
-
-AgentGrid delivers an end-to-end compute control plane whose every mutation is governed by an
-operator control mode. The mode is held by the server; a caller cannot grant itself permission.
-
-### 1. Recherche de capacité compatible (Multi-Stage Capacity Search)
-* **4-Stage Sourcing Lifecycle**:
-  1. `catalog_proposed`: Hardware matching across CPU, memory, GPU, AVX-512 constraints.
-  2. `quota_authorized`: Real-time quota check (`QUOTA_AVAILABLE`, `QUOTA_EXCEEDED`, or `QUOTA_UNKNOWN`).
-  3. `capacity_estimated`: GCP Capacity Advisor signals (obtainability score 0–100%, preemption risk, uptime).
-  4. `actually_allocated`: Ground-truth scheduler verification on the cluster.
-* **Truthful Provenance**: Explicit distinction between `gcp_live_api`, `simulated_demo`, and `unavailable`.
-* **Every permitted location is searched.** The search covers each region in the workload's
-  `allowed_regions`, not just the first, so a shortage in one region is not reported as "no
-  compatible capacity" while other authorised regions were never queried. An explicit
-  `region` narrows the search back to that one region. A single search is capped at
-  `MAX_SEARCH_REGIONS` (5) and names the regions it left out; the response carries
-  `searched_regions` and, when location constraints exclude everything, a `location_note`
-  saying which region was asked for and which were permitted. The search and that note come
-  from the same resolver, so they cannot disagree.
-* **Each region's quota document is read once per search**, not once per machine type
-  (30 s TTL, `AGENTGRID_QUOTA_CACHE_TTL=0` to read through). Only successful reads are
-  cached: a credential failure or a 503 reaches the caller every time it happens.
-
-### 2. Diagnostic des blocages (Blocker Diagnostic Engine)
-Structured taxonomy classifying execution impediments into:
-* `resource_waiting`: Cluster saturation, dynamic cloud VM spin-up wait.
-* `priority`: Queued behind higher-priority workloads.
-* `dependencies`: Upstream workflow dependencies or user/admin holds.
-* `quota`: a ceiling was reached — **and the finding names who holds it.** A GCP regional or
-  project quota is sourced `gcp_compute_quota` and remedied by a quota request; a Slurm
-  QoS/association ceiling (`QOSMaxJobsPerUserLimit`, `AssocGrpCPURunMinutes`, …) is sourced
-  `slurm_controller` and remedied by reducing parallelism, waiting for the account's own
-  jobs, or `sacctmgr`. The two are reported as separate findings when both apply.
-* `capacity_shortage`: Cloud stockouts (`ZONE_RESOURCE_POOL_EXHAUSTED`), preemption spikes.
-* `incompatible_configuration`: Invalid constraints (`BadConstraints`), unsupported shapes.
-* `application_error`: Non-zero exit codes (e.g. exit 137 OOM, exit 139 SIGSEGV) with targeted remediations.
-
-### 3. Comparaison déterministe de plans (Deterministic Plan Comparison)
-* **3 Readable Plans**:
-  * **Cost-Optimized**: Lowest estimated spend meeting deadline (Spot instances, right-sized cores).
-  * **Deadline-Favored**: Fastest time to result within budget (high parallelism, Standard On-Demand).
-  * **Balanced Trade-off**: Hedged allocation balancing cost and preemption SLA (e.g., 80% Spot / 20% Standard).
-* **Cost & Time Transparency**:
-  * Cost inclusions (`vm_compute_hourly`) and known exclusions (`network_egress`, `persistent_disk_storage`).
-  * Time breakdown: Wait/Boot, Environment Prep, Active Execution (Amdahl scaling model), Checkpoint Recovery.
-* **Capacity is the third axis, not a slogan.** Every plan carries
-  `capacity_status` (`QUOTA_AVAILABLE` / `QUOTA_EXCEEDED` / `QUOTA_UNKNOWN` / `NOT_CHECKED`),
-  `capacity_detail` and `capacity_source`, read from the Compute Engine quota API when a project
-  is configured. Before this, the comparison was cost and delay only: a 64 vCPU request returned
-  two 88 vCPU plans with nothing said about whether 88 vCPUs could be obtained. An unreadable
-  quota stays `QUOTA_UNKNOWN` — deliberately not the same statement as available — and an
-  exceeded quota is also folded into the plan's `unverified_points`. Set
-  `AGENTGRID_PLAN_CAPACITY_CHECK=false` to skip the lookup; the plans then report `NOT_CHECKED`
-  rather than an assumed availability.
-* **Unfeasible Handling**: Zero hallucinated winning plans. If constraints conflict, returns an empty plan set with an explicit explanation of blocking constraints and suggested relaxations.
-
-### 4. Exécution et repli contrôlés (Operator Governance & Fallback)
-* **3 Operator Control Modes**:
-  * **Advisory (`advisory`)**: Strictly read-only suggestions. All mutations/submissions are rejected.
-  * **Validation (`validation`)**: Human-in-the-loop approval. Plan execution blocked until operator clicks "Approve".
-  * **Delegation (`delegation`)**: Execution bounded by `DelegationPolicy` guardrails (budget
-    ceiling, allowed machine types, allowed regions, allowed provisioning models, retry count)
-    without stopping for each approval.
-* **The delegated budget is a cumulative ceiling, reconstructed server-side.** It is not a
-  per-action check. Before each submission the server sums what this workload has already
-  committed — every ledger row in `claimed`, `submitted` or `uncertain` state, priced at claim
-  time — and adds the plan being proposed. A caller may pass its own `accumulated_cost_eur`, but
-  the server takes `max(caller, ledger)`, so a caller can only ever *tighten* the bound. Three
-  distinct 8 EUR plans under a 10 EUR delegation therefore yield one submission and two refusals,
-  not three jobs. `GET /api/workloads/{id}/control` reports `committed_cost_eur` and
-  `remaining_delegated_budget_eur` so the headroom is visible. A `failed` submission created
-  nothing and is not charged; an `uncertain` one may have, so it is. Ledger rows written before
-  submissions were priced are surfaced as `unpriced_prior_submissions` rather than counted as
-  free. The same rule applies to every rung of the fallback ladder.
-* **The retry ceiling is enforced the same way.** `max_retries` was checked but never fed an
-  attempt count, so it never fired: with `max_retries: 1`, four distinct plans produced four
-  jobs. Every claim ever won for a workload is now counted as a launch, and releasing a claim
-  archives it instead of deleting it — otherwise a release-and-retry loop erases its own history
-  and runs forever. A released `submitted` or `uncertain` claim also keeps its cost charged: a
-  job existed, or may have, and authorising another try is not a refund. A released `failed`
-  claim created nothing and is refunded.
-* **The controlled fallback is reachable.** `POST /api/workloads/{id}/fallback` and the MCP tool
-  `select_fallback_plan` return the next authorised rung: advisory refuses outright, the delegated
-  ceilings are recomputed from the ledger, rungs that break the workload's constraints come back in
-  `skipped_candidates` with their reason, and the verdict carries `requires_approval` outside
-  delegation. The decision never submits — `submitted: false`, and the plan still has to go through
-  `/api/execute-plan`. The dashboard exposes it as "Proposer un repli" on each plan card.
-* **The constraints declared on the workload bind execution, not just planning.**
-  `allowed_regions`, `allowed_zones`, `allow_spot`, `allow_region_change`, `allow_zone_change`
-  and `allow_fallback_to_standard` used to be honoured only by the plan engine. `DelegationPolicy`
-  was the sole thing consulted before launching, it is optional, and nothing forced the operator
-  to restate their constraints in it — so a workload pinned to `europe-west4` with
-  `allow_spot=False` could be submitted onto Spot capacity in `us-central1`. They are now checked
-  on every submission, in every mode: an approval authorises *a plan*, it does not repeal a
-  location limit. They are also checked against the profile the server persisted when the plans
-  were compared, so a caller cannot widen its own constraints in the execution request; the
-  refusal names which profile refused (`constraint_source`).
-* **A fallback rung is subject to the same constraints.** The ladder never received the profile,
-  which made the step meant to be the most controlled the least controlled one: it would move a
-  region-pinned workload to another region, or switch a Spot-only workload to on-demand. A
-  non-compliant rung is now skipped with its reason recorded in `skipped_candidates`, a compliant
-  rung further down is still selected, and `constraint_breach` is returned when none survives.
-  When no profile can be read at all, `profile_constraints_source: unavailable` says so instead
-  of implying the rung was checked. Outside delegation the verdict carries
-  `requires_approval: true`: selecting a rung is a proposal, not a licence to launch.
-* **Both ceilings are evaluated inside the claim's own transaction.** Checking on one
-  connection and inserting on another is a time-of-check/time-of-use race, and it is not
-  theoretical: four *different* plans submitted concurrently do not share a submission key, so
-  the primary key does not separate them, and all four were accepted under `max_retries: 1`.
-  `claim_submission_within_limits` takes the write lock with `BEGIN IMMEDIATE` before counting.
-  `tests/test_concurrent_submission.py` runs real threads against one database file.
-* **Execution Safety**:
-  * **Ordered Fallback Ladder**: Automatic failover (e.g., Spot → Standard On-Demand) when stockouts occur, staying within remaining budget.
-  * **Idempotent Anti-Duplicate Submission**: A submission is claimed in a persistent SQLite
-    ledger, keyed by workload and plan fingerprint, *before* the runtime is touched. The claim
-    is the primary key itself, so a double click, a replayed HTTP request or a process restart
-    resolves to the same job id instead of creating a second job. An ambiguous timeout is
-    resolved by looking up that identity, not by guessing.
-  * **Safe Downscaling**: Automatically releases temporary allocations and resizes cluster to baseline upon completion or cancellation.
-
-### 5. Suivi et reprise (Lifecycle Management & Resumption)
-* **Lifecycle States**: `DEFINED` → `PLANNING` → `READY_FOR_APPROVAL` → `SUBMITTING` → `QUEUED` → `RUNNING` → `COMPLETED` / `PREEMPTED` / `FAILED` / `CANCELLED`.
-* **Observable Progress**: Three states, never conflated — `measured` (read from the runtime),
-  `declared_unverified` (a figure someone stated, including the language model through the MCP
-  tools) and `unavailable`. A declared cost is stored with `cost_status="estimated"`; only the
-  runtime adapter produces `calculated_from_usage`.
-* **Checkpoint Resumption vs. Full Restart**: The checkpoint location is *inspected* before a
-  resume is promised. A local path is read; a `gs://` URI is listed when the GCS client is
-  available. Three outcomes are distinguished — `verified_present`, `verified_absent` and
-  `unverified` — and a retry only records a recovery against a checkpoint verified present.
-  A workload with previous attempts and a demonstrably empty location is told it restarts
-  from 0% rather than being promised a resume that does not exist.
-* **Bounded Retries**: Enforces strict `max_retries` ceiling to protect operator budget from runaway crash loops.
-
-### 6. Coût réel, historique et comparaison aux estimations (3-Tier Cost Reconciliation)
-* **Persistent SQLite Storage**: Preserves workload profiles, plans, attempts, and post-mortems across application restarts (`~/.agentgrid/agentgrid_history.db` or `AGENTGRID_DB_PATH`).
-* **3-Tier Cost Model**:
-  1. `initial_estimated_cost_eur`: Pre-execution deterministic estimate.
-  2. `calculated_from_usage_eur`: Actual elapsed node-hours × verified VM rates.
-  3. `reconciled_billed_cost_eur`: only labelled `reconciled_billed` when the caller names
-     `billed_cost_source="gcp_billing_export"`. There is no billing integration in this project,
-     so a figure simply handed to the API is reported as `caller_supplied_unverified`, and the
-     absence of any figure as `source_not_integrated`.
-
-  Tier 2 counts **only** attempts whose `cost_status` is `calculated_from_usage`. A figure a
-  caller merely stated (`cost_status="estimated"`, which is what the MCP tool records) is
-  reported separately as `declared_unverified_cost_eur`; `total_recorded_cost_eur` still holds
-  everything, and the variance against the estimate is computed on that total.
-* **Continuous Benchmark Calibration**: Aggregates verified work-unit execution rates and interruption frequencies into a self-calibrating benchmark table.
-
-
-## What is verified, and what is not
-
-Being precise about this matters more than the feature list. As of the current commit:
-
-| Area | Status | How it was checked |
-| :--- | :--- | :--- |
-| Governance (advisory / validation / delegation), plan registration, fingerprint-bound approval, idempotent submission | **Verified** | `tests/test_http_journey.py`, `tests/test_mcp_http_governance.py`, plus a full journey run with `curl` against a live server |
-| Cumulative delegated budget ceiling (server-derived, caller cannot understate it) | **Verified** | `tests/test_delegation_budget_ceiling.py` — 9 of its 10 controller tests fail against the previous code |
-| Idempotency and delegated ceilings under real concurrency | **Verified** | `tests/test_concurrent_submission.py` — 8 racing threads yield one job and one charge |
-| Plan comparison, infeasibility explanations, constraint rejection | **Verified** | `tests/test_evolved_capabilities.py`, `tests/test_agentgrid_evolutions.py` |
-| Location constraints and quota staging | **Verified** | `tests/test_capacity_location_constraints.py` |
-| Lifecycle, checkpoint verification, cost accounting across attempts and restarts | **Verified** | `tests/test_checkpoint_verification.py`, `tests/test_cost_accounting_journey.py` |
-| GCP quota read (regional `CPUS` / `NVIDIA_*_GPUS` **and** the project-wide `GPUS_ALL_REGIONS` ceiling) | **Exercised against the real API** | a live `/api/capacity-search` returned `data_provenance: gcp_live_api` with a genuine `QUOTA_EXCEEDED`; response shapes pinned in `tests/test_quota_api_contract.py` against the published [`regions.get`](https://cloud.google.com/compute/docs/reference/rest/v1/regions/get) and [`projects.get`](https://cloud.google.com/compute/docs/reference/rest/v1/projects/get) contracts |
-| Separation of measured cost from declared cost, and refusal to call an unsourced figure "reconciled billing" | **Verified** | `tests/test_cost_reconciliation_honesty.py` — 10 of its 11 tests fail against the previous code |
-| The workload's own constraints (region, zone, Spot, fallback to Standard) bind submission *and* every fallback rung | **Verified** | `tests/test_profile_constraints.py` — before the fix a plan in a forbidden region was submitted with a real job id |
-| A caller cannot widen its own constraints at execution time | **Verified** | `tests/test_profile_constraints.py` — the profile persisted at plan-comparison time refuses first; `constraint_source` names which profile refused |
-| The capacity axis of the cost / delay / capacity comparison | **Verified, and exercised against the real API** | `tests/test_plan_capacity_dimension.py` for the contract; against the live project the same 88 vCPU plans answered `QUOTA_EXCEEDED ... available 0/0` with `data_provenance: gcp_live_api` |
-| Every quota figure names the project it came from | **Verified** | `tests/test_plan_capacity_dimension.py`; `resolve_quota_project()` is the single resolver, and a figure read from the built-in default project says so in its reason and in the dashboard |
-| The controlled fallback is reachable by an operator and by the agent | **Verified** | `tests/test_fallback_exposure.py` — `POST /api/workloads/{id}/fallback`, MCP `select_fallback_plan`, and a dashboard control; the decision never submits |
-| A blocker keeps the origin that actually holds it | **Verified** | `tests/test_scheduler_limit_attribution.py` — a Slurm `QOSMaxJobsPerUserLimit` used to be reported as `source: gcp_compute_quota` advising a cloud quota increase, which no cloud administrator can grant; 20 of the file's 39 tests fail against the previous code |
-| Every region the operator permitted is searched, not just the first | **Verified** | `tests/test_multi_region_search.py` — `resolve_search_regions()` is the single resolver used by both the search and the HTTP explanation, so the candidates and the note can no longer disagree; the search is capped at 5 regions and names the ones left out |
-| One capacity search reads each region's quota document once | **Verified, measured against the real API** | `tests/test_quota_fetch_cache.py` — the same 12 live-API tests in `tests/test_multi_region_search.py` went from **88.7 s to 5.1 s**. Only successful reads are cached, for 30 s by default (`AGENTGRID_QUOTA_CACHE_TTL=0` disables it); an outage is never frozen in |
-| The agent sees complete location search metadata, not just candidates | **Verified** | `tests/test_capacity_location_reaches_the_agent.py` — `search_capacity` (tool and custom route) provides `searched_regions`, `allowed_regions`, `allow_region_change`, and `location_note`, allowing the agent to distinguish location exclusion from catalog incompatibility; 7 of 8 tests fail pre-fix |
-| Execution | **Simulator only** | no VM has been provisioned by this project's test runs |
-| Slurm adapter | **Mocked HTTP only** | `tests/test_slurm.py`, `tests/test_slurm_telemetry_defects.py` drive stubbed `slurmrestd` responses. **Not validated against a real cluster.** |
-| Dashboard | **Compiled and rendered offline, not opened in a browser** | `tools/check_jsx.py`, `tools/render_check.py`. CSS, layout and real event dispatch are **not** covered. |
-| `gs://` checkpoints | **Not verifiable in the reference environment** | `google-cloud-storage` is not installed; the result is reported as `unverified`, never as present |
-| Multi-tenant authentication | **Out of scope** | governance works without it, but there is no user identity model |
-
-
-## Supported Compute Runtimes
-
-| Capability | `COMPUTE_RUNTIME=simulator` | `COMPUTE_RUNTIME=slurm` |
-| :--- | :--- | :--- |
-| **Target Environment** | Local developer machines, CI/CD pipelines | Production GCP HPC Slurm cluster |
-| **Prerequisites** | None (pure Python discrete-event simulation) | GCP VPC with `slurmrestd` + JWT authentication |
-| **Workload Scope** | Deterministic Monte Carlo simulation (`mc-001`) | Real cluster jobs (`SLURM_JOB_ID`) |
-| **Transport Protocol** | `stdio` (local subprocess) or `sse` | `sse` on Cloud Run via Direct VPC Egress |
-| **Actuation Mechanism** | State progression engine with Amdahl scaling | Direct `slurmrestd` REST API v0.0.41 |
-
----
-
-## Quickstart (Local Development)
-
-### 1. Prerequisites & Installation
-
-Python 3.11+ is required.
+No cloud account needed: without configuration, runs go to the built-in simulator, and the page says so.
 
 ```bash
-# Clone repository
 git clone https://github.com/samy-fadel/agentgrid.git
 cd agentgrid
-
-# Setup virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# Configure environment
-cp .env.example .env
+AGENTGRID_PLAN_CAPACITY_CHECK=false PORT=8080 python3 -m compute_agent.app
 ```
 
-### 2. Configure Gemini / Vertex AI Authentication
+`AGENTGRID_PLAN_CAPACITY_CHECK=false` skips the Compute Engine quota lookup, which needs Google Cloud credentials
+(without them, every comparison waits on the credential search). Plans then say `NOT_CHECKED`. With credentials,
+drop it and set `GOOGLE_CLOUD_PROJECT`.
 
-```bash
-gcloud auth application-default login
-gcloud config set project YOUR_PROJECT_ID
-```
-
-Edit your `.env` file:
-
-```env
-GOOGLE_GENAI_USE_VERTEXAI=TRUE
-GOOGLE_CLOUD_PROJECT=YOUR_PROJECT_ID
-GOOGLE_CLOUD_LOCATION=us-central1
-AGENTIC_COMPUTE_MODEL=gemini-2.5-flash
-```
-
-### 3. Run the control plane and the dashboard
-
-The API and the operator dashboard are one FastAPI application. It needs **no
-cloud credentials** to start: capacity search, plan comparison, diagnostics,
-governance, execution against the simulator, lifecycle tracking and history all
-work offline. Credentials only affect the live GCP quota lookup, the Capacity
-Advisor signal and the LLM-driven `/optimize` endpoints.
-
-```bash
-# from the repository root, with the environment installed as above
-PORT=8080 python3 -m compute_agent.app
-```
-
-Then open `http://localhost:8080/ui` for the dashboard.
-
-> `/` performs content negotiation: a browser (`Accept: text/html`) receives the
-> dashboard, any other client receives service metadata as JSON. `/ui` and
-> `/dashboard` always return the dashboard.
-
-Useful checks:
+Open <http://localhost:8080/>, or call the API directly:
 
 ```bash
 curl -s localhost:8080/health
-curl -s -X POST localhost:8080/api/capacity-search \
-  -H 'Content-Type: application/json' \
-  -d '{"cpu_requested": 8, "allowed_regions": ["europe-west4"]}'
-curl -s -X POST localhost:8080/api/plans/compare \
-  -H 'Content-Type: application/json' \
-  -d '{"workload_profile": {"workload_id": "wl-demo", "cpu_requested": 8,
-       "memory_mb_requested": 16384, "estimated_duration_minutes": 60,
-       "budget_amount": 500}}'
+curl -s -X POST localhost:8080/api/plans/compare -H 'Content-Type: application/json' \
+  -d '{"workload_profile": {"workload_id": "wl-demo", "cpu_requested": 8, "memory_mb_requested": 16384,
+       "estimated_duration_minutes": 60, "deadline_minutes_from_start": 60, "budget_amount": 50}}'
 ```
 
-> An unknown key in `workload_profile` is rejected with HTTP 400 naming the
-> field. This is deliberate: a misspelled `budget_eur` used to be dropped
-> silently, and the answer came back "feasible" without the budget ever having
-> been considered.
+An unknown key in `workload_profile` is rejected with HTTP 400 naming the field, so a typo cannot silently drop
+a constraint.
 
-### 4. Run the ADK playground (optional, requires Gemini credentials)
-
-Launch the ADK graphical playground:
+### Optional: the Gemini agent
 
 ```bash
-adk web .
+gcloud auth application-default login
+cp .env.example .env    # set GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION, AGENTIC_COMPUTE_MODEL
+adk web .               # playground on http://localhost:8000, pick compute_agent
 ```
 
-Open your browser at `http://localhost:8000`, select **`compute_agent`**, and provide an objective:
+The control plane serves the same agent on `POST /optimize` and `POST /optimize/stream` (Server-Sent Events).
 
-> *"Optimize the compute workload against the configured deadline and budget. Minimize overall cost, adapt to cluster feedback, and summarize the final execution."*
+## Connect your Slurm cluster
 
-Or run directly from the CLI:
+AgentGrid talks to Slurm through `slurmrestd` (data parser v0.0.41), authenticated with a JWT.
 
 ```bash
-adk run compute_agent
+COMPUTE_RUNTIME=slurm \
+SLURM_REST_URL=http://<controller>:6842/slurm/v0.0.41 \
+SLURM_JWT_TOKEN=<output of scontrol token> \
+SLURM_USER=<slurm user> \
+PORT=8080 python3 -m compute_agent.app
 ```
 
-### 5. Tests and the offline dashboard gate
+- Partitions map to machine types in `SUPPORTED_SLURM_PARTITIONS`
+  ([`slurm_adapter.py`](src/agentic_compute/slurm_adapter.py)): `debug` → `n2-standard-2`,
+  `compute` → `c2-standard-60`, `h3` → `h3-standard-88`. Edit it to match your cluster.
+- A job is submitted with its partition, CPUs, memory and command. No node features or constraints are sent:
+  the partition pins the machine type, which is recorded in the job comment. A bare command such as
+  `sleep 30` gets a `#!/bin/bash` line.
+- Nothing is called at startup, so an unreachable controller does not stop the service: `/api/snapshot`
+  returns the error instead.
 
-```bash
-pytest -q                       # pythonpath is configured in pyproject.toml
-python3 tools/check_jsx.py      # parses the dashboard's JSX offline
-python3 tools/render_check.py   # renders every tab in duktape and reports errors
-```
+## Deploy on Google Cloud
 
-`check_jsx.py` and `render_check.py` exist because there is no Node.js and no
-browser in the reference development environment. They transpile the dashboard
-with the TypeScript compiler bundled in `dukpy` and execute it against a minimal
-React stub. They catch syntax errors, undefined references at render time and
-tabs that render nothing. **They are not a browser**: CSS, layout, real event
-dispatch and network behaviour are not covered by them.
-
----
-
-## Production Deployment on Google Cloud
-
-AgentGrid deploys with automated CI/CD using **Cloud Build**, **Artifact Registry**, and **Cloud Run** with **Direct VPC Egress** connecting directly to private Slurm clusters.
+A push to `main` runs the Cloud Build pipeline in [`cloudbuild.yaml`](cloudbuild.yaml).
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    actor Dev as Engineer
-    participant GH as GitHub (agentgrid)
-    participant CB as Cloud Build Pipeline
-    participant AR as Artifact Registry
-    participant CR_Agent as Cloud Run (Agent Service)
-    participant CR_MCP as Cloud Run (MCP Server)
-    participant VPC as VPC (Slurm Cluster)
-
-    Dev->>GH: git push origin main
-    GH->>CB: Webhook trigger
-    CB->>CB: 1. Run unit & contract tests (pytest)
-    CB->>AR: 2. Build & push Docker images
-    CB->>CR_MCP: 3. Deploy MCP Server (Direct VPC Egress + Slurm JWT)
-    CB->>CR_Agent: 4. Deploy Agent Service (Auto-bind MCP URL)
-    CB->>CR_MCP: 5. Grant IAM roles/run.invoker to Agent Service
-    CR_Agent->>CR_MCP: Authenticated tool calls (GCP OIDC)
-    CR_MCP->>VPC: Manage Slurm allocations via slurmrestd
+flowchart LR
+    Push["git push main"] --> Tests["run-unit-tests"] --> Build["build and push<br/>two images"] --> Deploy["deploy-services"]
+    Deploy --> Agent["Cloud Run<br/>agentic-compute-agent<br/>dashboard and API"]
+    Deploy --> MCP["Cloud Run<br/>agentic-compute-mcp<br/>private"]
+    Agent -- "run.invoker" --> MCP
+    Agent --> VPC[("Slurm network<br/>slurmrestd")]
+    MCP --> VPC
 ```
 
-### Interacting with the Cloud Run Agent
+[`scripts/deploy_services.sh`](scripts/deploy_services.sh) deploys both services with Direct VPC egress to the
+cluster network and the JWT from Secret Manager, then grants the agent's service account `roles/run.invoker` on
+the MCP service. One-time setup (Artifact Registry, trigger, IAM): [`scripts/setup_ci_cd.sh`](scripts/setup_ci_cd.sh).
 
-* **Interactive Web Dashboard UI**:
-  Visit `https://<AGENT_SERVICE_URL>.a.run.app/` or `/ui` in your browser.
-  * Real-time streaming feed of Gemini's reasoning and tool invocations via Server-Sent Events.
-  * Interactive controls for Deadline (mins), Budget (€), and Cost Minimization strategy.
-  * Live candidate allocation matrix with speedup curves and cost forecasts.
-  * Slurm Ground-Truth verification card showing active job status, verified allocated CPUs, and cluster verification commands.
+| Deploy variable | Default | Effect |
+| :--- | :--- | :--- |
+| `AGENT_COMPUTE_RUNTIME` | `slurm` | `simulator` keeps the dashboard on the built-in simulator |
+| `REQUIRE_IAM_AUTH` | `false` | `true` deploys the agent service with `--no-allow-unauthenticated` (so does `ALLOW_UNAUTHENTICATED=false`) |
+| `AGENTGRID_API_KEY_SECRET` | none | Secret Manager secret holding an API key that the agent service then requires |
+| `SLURM_REST_URL`, `SLURM_SECRET_NAME` | in `cloudbuild.yaml` | Controller URL, and the secret holding the JWT |
+| `VPC_NETWORK`, `VPC_SUBNET` | in `cloudbuild.yaml` | Network and subnet for Direct VPC egress |
+| `MCP_MIN_INSTANCES` | `0` | Minimum instances of the MCP service |
 
-* **Slurm Verification on Cluster**:
-  ```bash
-  # Check active job parameters on the Slurm login node
-  scontrol show job <JOB_ID> | grep -E "NumCPUs|JobState|CPUs/Task"
-  squeue -j <JOB_ID> -o "%.8i %.9P %.8j %.8u %.2t %.10M %.6D %C"
+> [!IMPORTANT]
+> Unless you set `REQUIRE_IAM_AUTH=true`, the agent service is deployed with `--allow-unauthenticated`.
+> Once it is connected to Slurm, anyone who can reach it can approve and run jobs on your cluster.
 
-  # Query the live agent snapshot API
-  curl -s https://<AGENT_SERVICE_URL>.a.run.app/api/snapshot | jq .
-  ```
+## Configuration
 
-* **Synchronous & Streaming REST Endpoints**:
-  ```bash
-  # Synchronous optimization
-  curl -X POST https://<AGENT_SERVICE_URL>.a.run.app/optimize \
-    -H "Content-Type: application/json" \
-    -d '{"objective": "Meet deadline while minimizing compute cost under queue pressure."}'
+| Variable | Default | What it does |
+| :--- | :--- | :--- |
+| `COMPUTE_RUNTIME` | `simulator` | `slurm` sends runs to your cluster |
+| `SLURM_REST_URL` | `http://10.0.0.4:6842/slurm/v0.0.41` | `slurmrestd` base URL |
+| `SLURM_JWT_TOKEN` | empty | JWT, sent as `X-SLURM-USER-TOKEN` |
+| `SLURM_USER` | `slurm` | Slurm user, sent as `X-SLURM-USER-NAME` |
+| `SLURM_VERIFICATION_TIMEOUT_SECS` | `60` | How long a change may wait for the controller's confirmation before it is reported as timed out |
+| `AGENTGRID_DEFAULT_CONTROL_MODE` | `validation` | `advisory`, `validation` or `delegation` |
+| `AGENTGRID_DB_PATH` | `~/.agentgrid/agentgrid_history.db` | SQLite file: plans, approvals, submission ledger, history |
+| `AGENTGRID_API_KEY` | none | When set, API calls need `X-API-Key: <key>` or `Authorization: Bearer <key>` |
+| `AGENTGRID_PLAN_CAPACITY_CHECK` | `true` | Checks each plan against the Compute Engine quota (needs Google Cloud credentials). With `false`, plans say `NOT_CHECKED` |
+| `AGENTGRID_QUOTA_CACHE_TTL` | `30` | Seconds a successful quota read is reused (`0` disables the cache) |
+| `AGENTGRID_ALLOWED_ORIGINS` | any origin, no credentials | Comma-separated CORS allowlist |
+| `GOOGLE_CLOUD_PROJECT` | `PROJECT_ID`, else a built-in demo project | Project for quota reads and Vertex AI. The fallback is reported as `built_in_default` |
+| `MCP_SERVER_URL` | local stdio | Remote MCP server used by the agent |
+| `AGENTIC_COMPUTE_MODEL` | `gemini-2.5-flash` | Model used by the agent |
 
-  # Real-time SSE stream
-  curl -N -X POST https://<AGENT_SERVICE_URL>.a.run.app/optimize/stream \
-    -H "Content-Type: application/json" \
-    -d '{"objective": "Meet deadline while minimizing compute cost under queue pressure."}'
-  ```
+## API
 
----
+The dashboard is a client of the same HTTP API. Interactive documentation is served on `/docs`.
 
-## 6 Target Operational Capabilities
+| Endpoint | Purpose |
+| :--- | :--- |
+| `POST /api/plans/compare` | Compare plans for a workload profile |
+| `POST /api/plans/approve` | Approve one plan, bound to its fingerprint |
+| `POST /api/execute-plan` | Submit an approved plan through the governance gate |
+| `GET /api/snapshot` | Live runtime state: cluster, current job, last action |
+| `POST /api/capacity-search` | Machine types that fit, with quota and Spot signals |
+| `POST /api/diagnose` | Why a job is waiting, and who holds each blocker |
+| `GET`, `POST /api/workloads/{id}/control` | Read or set the control mode and the delegation policy |
+| `POST /api/workloads/{id}/fallback` | Propose the next authorised fallback plan (never submits) |
+| `GET /api/history` | Past runs, with estimated, measured and declared costs |
+| `POST /optimize`, `POST /optimize/stream` | Run the Gemini agent (JSON or Server-Sent Events) |
 
-AgentGrid delivers 6 core operational capabilities for intelligent compute management:
+The MCP server ([`mcp_server.py`](src/agentic_compute/mcp_server.py)) exposes the same capabilities as 18
+tools, over stdio locally or SSE on Cloud Run.
 
-1. **Recherche de capacité compatible & Validation des quotas** (`search_capacity`, `search_compatible_capacity`):
-   - Traces candidates across 4 distinct lifecycle stages: `catalog_proposed` -> `quota_authorized` -> `capacity_estimated` -> `actually_allocated`.
-   - Explicit data provenance (`gcp_live_api`, `simulated_demo`, `unavailable`, `unknown`) without silent demo masking.
-2. **Diagnostic structuré des blocages** (`diagnose_blockers_tool`, `diagnose_blockers`):
-   - Categorizes impediments into: `resource_waiting`, `priority`, `dependencies`, `quota`, `capacity_shortage`, `incompatible_configuration`, `application_error`.
-   - Distinguishes observed facts from hypotheses, identifies origins, and generates concrete remediation actions with trade-off consequences.
-3. **Moteur déterministe de comparaison de plans** (`compare_plans`, `evaluate_and_compare_plans`):
-   - Generates up to 3 distinct candidates: `cost_optimized`, `deadline_favored`, and `balanced_tradeoff`.
-   - Transparent cost scope (compute vs network/storage exclusions) and Amdahl scaling model.
-   - When constraints are unfeasible, explains factually what blocks without inventing an imaginary winner.
-4. **Exécution gouvernée & Repli contrôlé** (`execute_plan_controlled`, `ExecutionController`):
-   - **3 Operator Control Modes**:
-     * **Conseil (Advisory)**: Strictly read-only recommendations; rejects any infrastructure mutation.
-     * **Validation**: Prepares execution plans; blocks execution until explicit human operator approval.
-     * **Délégation**: Autonomous execution bounded by strict `DelegationPolicy` guardrails (max budget, machine types, regions, retry counts).
-   - Ordered fallback ladder (Spot -> Standard / alternative shapes) verifying remaining budget.
-   - Anti-duplicate idempotent submission across network timeouts.
-   - Safe downscaling protecting active compute nodes from termination.
-5. **Suivi du cycle de vie et reprise** (`track_workload_lifecycle`, `LifecycleManager`):
-   - Clean separation between compute identity (`workload_id`) and attempt history (`attempt_id`).
-   - Checkpoint resumption is granted only against a checkpoint that was actually inspected;
-     a location that cannot be read is reported as `unverified` and the resume is declared
-     unproven rather than promised.
-   - Strict rejection of inconsistent partial resumptions for non-interruptible workloads.
-6. **Coûts réels, historique persistant et étalonnage** (`get_cost_history`, `HistoryStore`):
-   - Persistent disk storage (SQLite / JSON) surviving application restarts.
-   - Explicit 3-tier cost breakdown: Initial Estimate vs Calculated from Usage vs Reconciled Billed Cost.
-   - Comparable workload metrics for runtime calibration.
+## Development
 
----
+```bash
+python3 -m pytest -q            # full test suite
+python3 tools/check_jsx.py      # parses the dashboard's JSX offline
+python3 tools/render_check.py   # renders every tab offline and reports errors
+```
 
-## Project Structure
+The dashboard is a single file, [`compute_agent/static/index.html`](compute_agent/static/index.html): React 18
+and Tailwind from CDNs, no build step. The two tools catch syntax errors and render-time crashes without Node.js
+or a browser. They do not cover CSS or layout.
+
+## Project layout
 
 ```text
-├── cloudbuild.yaml           # Automated CI/CD pipeline for Cloud Run
-├── Dockerfile.agent          # Container definition for ADK Agent Service
-├── Dockerfile.mcp            # Container definition for FastMCP Server
-├── pyproject.toml            # Package metadata, dependencies, and entrypoints
-│
-├── compute_agent/            # Agent Service Layer
-│   ├── agent.py              # Google ADK root_agent (Gemini + McpToolset with 6 capability tools)
-│   ├── app.py                # FastAPI HTTP REST API, SSE streaming & Web Dashboard UI
-│   ├── auth.py               # GCP OIDC token generator for IAM service-to-service
-│   └── static/
-│       └── index.html        # Interactive AgentGrid Web Dashboard (React tabs for all 6 features)
-│
-├── src/agentic_compute/      # Domain Logic & Compute Boundary
-│   ├── models.py             # Universal semantic abstractions, WorkloadProfile, ExecutionPlan
-│   ├── runtime.py            # RuntimeAdapter universal interface with Control Modes
-│   ├── simulator.py          # Deterministic discrete-event simulation runtime
-│   ├── slurm_adapter.py      # Production Slurm REST API adapter (v0.0.41) & verification engine
-│   ├── capacity_advisor.py   # GCP Compute Engine Capacity Advisor & quota verification client
-│   ├── capacity_search.py    # 4-stage capacity candidate search engine
-│   ├── diagnostics.py        # 7-category structured blocker diagnostic classifier
-│   ├── diagnostic.py         # Slurm & GCP blocker diagnostics interface
-│   ├── plan_engine.py        # Deterministic 3-plan comparison engine
-│   ├── execution_controller.py # Control mode gate, fallback ladder & idempotent executor
-│   ├── lifecycle_manager.py  # Workload attempt tracker & checkpoint resume coordinator
-│   ├── history.py            # Persistent SQLite execution store & 3-tier cost reconciler
-│   ├── history_store.py      # File-based JSON historical calibration store
-│   └── mcp_server.py         # FastMCP Server (dual SSE & stdio transports with 10 tools)
-│
-├── scripts/
-│   ├── deploy_services.sh    # Cloud Run deployment & IAM binding script
-│   └── setup_ci_cd.sh        # Setup script for Artifact Registry, triggers, and IAM
-│
-└── tests/                    # Comprehensive test suite (75 unit, contract & capability tests)
-    ├── test_agent_service.py # API & endpoint contract tests (9 tests)
-    ├── test_mcp_contract.py  # FastMCP interface & Capacity Advisor tests (13 tests)
-    ├── test_simulator.py     # Simulator progression & candidate tests (5 tests)
-    ├── test_slurm.py         # Slurm adapter verification, lifecycle & timeout tests (23 tests)
-    ├── test_agentgrid_evolutions.py # Focused evolution capability tests (13 tests)
-    └── test_evolved_capabilities.py # Section 11 end-to-end validation scenarios (12 tests)
+compute_agent/
+  app.py                    Control plane: dashboard and HTTP API
+  agent.py                  Gemini agent (Google ADK) with the MCP toolset
+  static/index.html         Dashboard: Run · Ledger · Cluster
+src/agentic_compute/
+  plan_engine.py            Deterministic plan comparison
+  governance.py             Control modes, approvals, submission ledger
+  execution_controller.py   Governance gate, fallback ladder, exactly-once submission
+  slurm_adapter.py          Slurm runtime over slurmrestd, with verification
+  simulator.py              Built-in simulated runtime
+  capacity_advisor.py       Compute Engine quota and Capacity Advisor client
+  diagnostics.py            Blocker diagnosis
+  history.py                SQLite history and cost reconciliation
+  mcp_server.py             MCP server (18 tools)
+scripts/                    deploy_services.sh, setup_ci_cd.sh
+tests/                      pytest suite
+tools/                      Offline dashboard checks
 ```
-
----
 
 ## Roadmap
 
-- [x] Universal compute semantic models (`ClusterState`, `WorkloadState`, `CandidateAllocation`).
-- [x] FastMCP server supporting dual transports (`stdio` local, `sse` remote).
-- [x] Deterministic discrete-event simulation runtime.
-- [x] Production Slurm REST API adapter (`slurmrestd` v0.0.41).
-- [x] Authoritative ground-truth verification engine with timeout deadlines & mismatch detection.
-- [x] GCP Capacity Advisor integration with Spot obtainability, preemption history & Slack Ratio $S$.
-- [x] Automated CI/CD with Google Cloud Build & Cloud Run Direct VPC Egress.
-- [ ] Multi-agent orchestration (Planner Agent + Cost Guardian Agent + Cluster Watchdog).
-- [ ] Kubernetes / GKE Ray cluster runtime adapter.
-
----
+- [x] Deterministic plan comparison, with a quota check on every plan
+- [x] Server-side governance, exactly-once submission, cumulative ceilings
+- [x] Slurm runtime over `slurmrestd`, with verification on the controller
+- [x] CI/CD with Cloud Build and Cloud Run, with Direct VPC egress
+- [ ] Write the measured cost and duration back to the Ledger
+- [ ] Persistent history on Cloud Run
+- [ ] Kubernetes / GKE runtime adapter
+- [ ] Multi-agent orchestration: planner, cost guardian, cluster watchdog
 
 ## License
 
-This project is licensed under the Apache License, Version 2.0. See the [LICENSE](LICENSE) and [NOTICE](NOTICE) files for details.
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
